@@ -8,7 +8,37 @@
             [kami.gen.procedural :as proc]
             [vrm.parse :as vrm-parse]
             [vrm.humanoid :as vrm-humanoid]
-            [vrm.vrm-types :as vt]))
+            [vrm.vrm-types :as vt]
+            [vrm.glb :as glb]
+            [vrm.json :as json]))
+
+;; ---------------------------------------------------------------------------
+;; Low-level accessor byte decode, independent of `kami.gen.procedural`'s own
+;; accessor-writing code (`add-accessor`) — reading JOINTS_0/WEIGHTS_0 back
+;; out of the raw glTF bufferViews/accessors + binary chunk, the same
+;; technique used to hand-verify the original "rigid mesh has no skin" bug.
+;; ---------------------------------------------------------------------------
+
+(defn- accessor->bytes [gltf bin acc-idx]
+  (let [acc (nth (:accessors gltf) acc-idx)
+        bv (nth (:bufferViews gltf) (:bufferView acc))
+        offset (+ (:byteOffset bv 0) (:byteOffset acc 0))]
+    (subvec (vec bin) offset (+ offset (:byteLength bv)))))
+
+(defn- read-u16-le [bs off] (bit-or (nth bs off) (bit-shift-left (nth bs (inc off)) 8)))
+
+(defn- read-f32-le [bs off]
+  (let [bb (java.nio.ByteBuffer/wrap (byte-array (map unchecked-byte (subvec bs off (+ off 4)))))]
+    (.order bb java.nio.ByteOrder/LITTLE_ENDIAN)
+    (.getFloat bb 0)))
+
+(defn- read-joints-vec4-u16 [gltf bin acc-idx n]
+  (let [bs (accessor->bytes gltf bin acc-idx)]
+    (mapv (fn [i] (mapv #(read-u16-le bs (+ (* i 8) (* % 2))) (range 4))) (range n))))
+
+(defn- read-weights-vec4-f32 [gltf bin acc-idx n]
+  (let [bs (accessor->bytes gltf bin acc-idx)]
+    (mapv (fn [i] (mapv #(read-f32-le bs (+ (* i 16) (* % 4))) (range 4))) (range n))))
 
 (deftest compose-costumed-character-shape-test
   (testing "top-level shape"
@@ -119,6 +149,66 @@
                  (proc/compose-costumed-character {:base :race/elf})))
     (is (thrown? #?(:clj Exception :cljs js/Error)
                  (proc/compose-costumed-character {:costume :unknown-costume})))))
+
+#?(:clj
+   (deftest rigid-mesh-skin-binding-regression-test
+     ;; Regression test for the "kami-gen-procedural-rigid" mesh node being
+     ;; exported with NO skin at all (a static mesh parented under the scene
+     ;; root): every head-family part (head shell/eyes/eyebrows/hair/kigurumi
+     ;; hood+beak) must bind fully to the `head` joint, and `clothing` must
+     ;; bind fully to the `chest` joint -- never an unbound/zero-weight
+     ;; vertex. Reads the accessors back out of the raw exported glTF
+     ;; (bufferViews + binary chunk), not through `kami.gen.procedural`'s own
+     ;; accessor-writing code, so this would have caught the original bug
+     ;; (which the higher-level `vrm.parse`/`vrm.humanoid` round-trip test
+     ;; above does NOT catch, since an unskinned primitive is still a
+     ;; perfectly valid, parseable glTF primitive).
+     (let [result (proc/compose-costumed-character {:seed 42})
+           bones (:bones (:skeleton (:body result)))
+           bone-idx (into {} (map-indexed (fn [i {:keys [name]}] [name i])) bones)
+           head-idx (bone-idx "head")
+           chest-idx (bone-idx "chest")
+           glb-bytes (:glb-bytes (:vrm result))
+           {:keys [json bin]} (glb/parse-glb glb-bytes)
+           gltf (json/parse (glb/byte-seq->string json))
+           material-name (fn [idx] (:name (nth (:materials gltf) idx)))
+           ;; expected single-bone joint for each material name this pipeline emits.
+           expected-joint {"skin" head-idx "eye_white" head-idx "iris" head-idx "pupil" head-idx
+                            "eyebrow" head-idx "hair" head-idx
+                            "kigurumi-hood" head-idx "kigurumi-beak" head-idx
+                            "clothing" chest-idx}
+           rigid-mesh (first (:meshes gltf))]     ;; mesh 0 = "kami-gen-procedural-rigid"
+       (is (some? head-idx))
+       (is (some? chest-idx))
+       (is (pos? (count (:primitives rigid-mesh))))
+       (doseq [prim (:primitives rigid-mesh)]
+         (let [mat (material-name (:material prim))
+               n (:count (nth (:accessors gltf) (:POSITION (:attributes prim))))
+               expected (get expected-joint mat)]
+           (testing (str "rigid primitive material=" mat " (" n " vertices)")
+             ;; the original bug: no JOINTS_0/WEIGHTS_0 attributes at all.
+             (is (contains? (:attributes prim) :JOINTS_0)
+                 "rigid mesh primitive must carry JOINTS_0 (was completely unskinned before the fix)")
+             (is (contains? (:attributes prim) :WEIGHTS_0))
+             (is (some? expected) (str "no expected joint mapping for material " mat))
+             (when expected
+               (let [joints (read-joints-vec4-u16 gltf bin (:JOINTS_0 (:attributes prim)) n)
+                     weights (read-weights-vec4-f32 gltf bin (:WEIGHTS_0 (:attributes prim)) n)]
+                 (is (pos? n))
+                 ;; every vertex binds fully (weight ~1.0) to exactly the
+                 ;; expected single joint -- never left at [0 0 0 0]/unbound.
+                 (is (every? #(= expected (first %)) joints)
+                     (str "expected every vertex bound to joint " expected
+                          ", got distinct joint0 values " (vec (distinct (map first joints)))))
+                 (is (every? #(> (first %) 0.99) weights)
+                     "expected every vertex fully weighted ([1,0,0,0]) to its single joint"))))))
+       ;; both mesh nodes reference the one shared skin -- posing that skin
+       ;; now moves the whole figure together, not just the torso.
+       (let [nodes (:nodes gltf)
+             rigid-node (some #(when (= (:name %) "kami-gen-procedural-rigid") %) nodes)
+             body-node (some #(when (= (:name %) "kami-gen-procedural-body") %) nodes)]
+         (is (= 0 (:skin rigid-node)))
+         (is (= 0 (:skin body-node)))))))
 
 (deftest publish-to-asset-hub-test
   (let [result (proc/compose-costumed-character {:seed 42})

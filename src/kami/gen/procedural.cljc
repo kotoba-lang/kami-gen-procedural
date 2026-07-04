@@ -34,19 +34,39 @@
   configurable pivot. Both knobs are plain overridable values in
   `default-proportions`, not hidden constants.
 
-  A second real gap, documented rather than hidden: `character/
-  generate-character` does not attach any of its rigid parts (head/eyes/
-  eyebrows/hair/clothing) to skeleton-bone NODES at all — only the `\"body\"`
-  MeshPart gets real `JOINTS_0`/`WEIGHTS_0` skin data
-  (`character.body/skin-body`). Every other part is a static mesh sharing
-  one world-space coordinate frame with the skeleton's BIND pose. This
-  pipeline's `:vrm` export is faithful to that: the hood/beak/body-suit
-  costume meshes are rigid siblings in that same shared frame (exactly
-  the ADR's 'no separate rig needed for a rigid hood'), and only `\"body\"`
-  + the new `\"body-suit\"` costume shell carry real skin weights. Posing
-  the exported VRM away from bind pose will move the skinned body/body-suit
-  but leave head/hair/hood/beak/clothing visually fixed — an existing
-  upstream `character` limitation, not something introduced here."
+  A second real gap existed here (documented, then FIXED — see below rather
+  than left as a standing limitation): `character/generate-character` does
+  not attach any of its rigid parts (head/eyes/eyebrows/hair/clothing) to
+  skeleton-bone NODES at all — only the `\"body\"` MeshPart gets real
+  `JOINTS_0`/`WEIGHTS_0` skin data (`character.body/skin-body`). Every
+  other part is a static mesh sharing one world-space coordinate frame with
+  the skeleton's BIND pose. Exporting that faithfully (rigid siblings, no
+  skin) meant posing the exported VRM away from bind pose moved the skinned
+  body/body-suit but left head/hair/hood/beak/clothing visually frozen in
+  place — verified as a real, visible bug (parsed the exported glTF JSON by
+  hand and confirmed the second mesh node had no `skin` reference at all,
+  then confirmed the practical symptom under `kami-engine`'s `:dance/avatar`
+  pose pipeline, ADR-0043), not merely a theoretical gap.
+
+  This pipeline's `:vrm` export now closes that gap itself rather than
+  inheriting it: every rigid part gets a real single-bone `JOINTS_0`/
+  `WEIGHTS_0` binding (`material->joint-bone-name` + `bind-part-to-joint`,
+  below) before being written into the same `skins[0]` the body mesh uses
+  — head-family parts (`head` shell/`eye-white`/`iris`/`pupil`/`eyebrow`/
+  `hair`, plus the kigurumi `hood`/`beak`) bind fully to the `head` joint,
+  and `clothing` binds fully to `chest` (a torso-level garment; `chest`
+  rather than `hips`, since it should sway with the upper torso/shoulders,
+  not just follow hip motion — see `character.body/generate-humanoid-
+  skeleton`'s `hips(0) -> spine(1) -> chest(2) -> upperChest(3) ->
+  neck(4) -> head(5)` chain). A single-bone weight of `[1,0,0,0]` is a
+  legitimate, spec-valid skin binding (nothing in glTF/VRM requires
+  influence spread across 4 joints); this is intentionally NOT the
+  `character.body/skin-weights` inverse-distance auto-skinning `\"body\"`
+  uses, since these parts are rigid by construction (a hood/beak/eyeball
+  should not deform, only follow one bone rigidly). Both the rigid and the
+  skinned body mesh NODES reference the one shared `skins[0]` (see
+  `assemble-vrm`), so a `:dance/avatar` pose now moves the whole figure
+  together."
   (:require [character :as character]
             [character.params :as char-params]
             [character.body :as char-body]
@@ -298,6 +318,66 @@
 (defn- find-part [parts name]
   (some #(when (= (:name %) name) %) parts))
 
+;; ---------------------------------------------------------------------------
+;; Rigid-part skin binding (bugfix, see namespace docstring's "second real
+;; gap" section): every non-body MeshPart used to be left with no
+;; `:joint-indices`/`:joint-weights` at all, so `add-mesh-primitive` emitted
+;; it as a static, unskinned glTF primitive parented directly under the
+;; scene root — correct at bind pose, visibly wrong (frozen head/hood/hair/
+;; clothing) as soon as the skeleton is posed. Every rigid part legitimately
+;; needs only ONE bone's full influence (nothing here deforms), so this is a
+;; single-bone bind, not `character.body/skin-weights`'s multi-bone inverse-
+;; distance auto-skinning (that fn is for genuinely deforming meshes like
+;; the torso/limbs, not a rigid hood or eyeball).
+;; ---------------------------------------------------------------------------
+
+(defn- bind-part-to-joint
+  "Every vertex of `part` bound fully (glTF `WEIGHTS_0 = [1,0,0,0]`) to the
+  single skeleton joint `joint-idx` (`JOINTS_0 = [joint-idx,0,0,0]`) — a
+  rigid part (hood, eyeball, hair shell, ...) doesn't deform, so it only
+  ever needs one bone's influence to become fully posable."
+  [part joint-idx]
+  (update part :vertices
+          (fn [vs] (mapv (fn [v] (assoc v
+                                        :joint-indices [joint-idx 0 0 0]
+                                        :joint-weights [1.0 0.0 0.0 0.0]))
+                         vs))))
+
+(def ^:private material->joint-bone-name
+  "Which single `character.body/generate-humanoid-skeleton` bone NAME each
+  rigid (non-\"body\") material's `merge-by-material` group binds fully to.
+  Head-family parts (the head shell itself, both eye materials, eyebrows,
+  hair, and the kigurumi hood+beak) all rigidly follow `\"head\"`.
+  `:clothing` is the one exception: a torso-level garment should sway with
+  the upper body, not swing on head turns, so it follows `\"chest\"` —
+  picked over `\"hips\"` (too low; would not follow shoulder/torso lean at
+  all) and over `\"head\"` (would make a shirt spin with head rotation) in
+  the skeleton's `hips -> spine -> chest -> upperChest -> neck -> head`
+  chain (`generate-humanoid-skeleton`'s bone list, indices 0-5)."
+  {:skin "head" :eye-white "head" :iris "head" :pupil "head"
+   :eyebrow "head" :hair "head" :hood "head" :beak "head"
+   :clothing "chest"})
+
+(defn- bind-rigid-parts
+  "`merge-by-material`'d rigid parts -> the same parts with real skin
+  weights attached, via `material->joint-bone-name` + `bind-part-to-joint`.
+  `bone-idx` is a `{bone-name-string joint-index}` lookup built from the
+  live skeleton (`bones->nodes`'s own bone list), not a hardcoded index, so
+  this stays correct if the skeleton's bone ORDER ever changes. Throws on
+  an unmapped material rather than silently leaving a part unskinned again
+  — same 'no silent wrong-but-valid output' convention `compose-costumed-
+  character` already uses for unknown race/costume ids."
+  [rigid-merged bone-idx]
+  (mapv (fn [{:keys [material] :as part}]
+          (let [bone-name (or (get material->joint-bone-name material)
+                               (throw (ex-info "kami.gen.procedural: no joint binding mapped for rigid material"
+                                                {:material material})))
+                joint-idx (or (get bone-idx bone-name)
+                              (throw (ex-info "kami.gen.procedural: joint bone not found in skeleton"
+                                               {:bone-name bone-name})))]
+            (bind-part-to-joint part joint-idx)))
+        rigid-merged))
+
 (defn- build-body-suit
   "The body-suit shell: `body-part` (already skinned by
   `character.body/skin-body` inside `character/generate-character`) offset
@@ -348,10 +428,14 @@
 
 (defn- add-mesh-primitive
   "One `{:material kw :vertices [...] :indices [...]}` part -> one glTF
-  primitive (attributes + indices accessor). Skinned vs rigid is detected
-  from whether vertices actually carry `:joint-indices` (from
-  `character.body/skin-body`) — `\"body\"`/`\"body-suit\"` do, everything
-  else doesn't."
+  primitive (attributes + indices accessor). Whether to emit `JOINTS_0`/
+  `WEIGHTS_0` is detected from whether vertices actually carry
+  `:joint-indices` — `\"body\"`/`\"body-suit\"` get theirs from
+  `character.body/skin-body`'s multi-bone auto-skinning, every other
+  (\"rigid\") part gets a single-bone binding from this namespace's own
+  `bind-rigid-parts` (see namespace docstring's bugfix section) — so in
+  practice every part is skinned now, but this fn stays agnostic and would
+  still correctly emit an unskinned primitive if a caller ever passed one."
   [state {:keys [vertices indices]} material-index]
   (let [positions (mapv :position vertices)
         normals (mapv :normal vertices)
@@ -457,9 +541,11 @@
   (let [bones (:bones skeleton)
         skel-nodes (bones->nodes bones)
         n-bones (count bones)
+        bone-idx (into {} (map-indexed (fn [i {:keys [name]}] [name i]) bones))
         body-part (find-part parts "body")
         rigid-parts (into (remove #(= (:name %) "body") parts) hood-parts)
-        rigid-merged (merge-by-material rigid-parts)
+        rigid-merged (-> (merge-by-material rigid-parts)
+                          (bind-rigid-parts bone-idx))
         used-kws (into (mapv :material rigid-merged) [:skin :body-suit])
         {:keys [index json]} (build-materials char-def kigurumi used-kws)
         state0 {:bin [] :buffer-views [] :accessors []}
@@ -476,7 +562,12 @@
         rigid-mesh-idx 0
         skinned-mesh-idx 1
         all-nodes (conj skel-nodes
-                        {:name "kami-gen-procedural-rigid" :mesh rigid-mesh-idx}
+                        ;; Both mesh nodes reference the SAME `skins[0]` (the
+                        ;; fix, see namespace docstring): rigid vertices now
+                        ;; carry real single-bone JOINTS_0/WEIGHTS_0 too
+                        ;; (`bind-rigid-parts`, above), so this is no longer
+                        ;; a static mesh parented under the scene root.
+                        {:name "kami-gen-procedural-rigid" :mesh rigid-mesh-idx :skin 0}
                         {:name "kami-gen-procedural-body" :mesh skinned-mesh-idx :skin 0})
         humanoid (build-humanoid bones)
         meta (vt/vrm-meta
