@@ -1,0 +1,14 @@
+;; kami-gen-procedural — deterministic EDN-parameter composed character
+;; pipeline (ADR-2607051100, com-junkawasaki/root). :local/root sibling
+;; deps, same convention as the 3 existing "actor" repos' langgraph-clj
+;; override (CLAUDE.md "Actors" section) and this org's other kotoba-lang
+;; sibling checkouts under orgs/kotoba-lang/*.
+{:paths ["src" "test"]
+ :deps {io.github.kotoba-lang/character  {:local/root "../character"}
+        io.github.kotoba-lang/mesher     {:local/root "../mesher"}
+        io.github.kotoba-lang/vegetation {:local/root "../vegetation"}
+        io.github.kotoba-lang/vrm        {:local/root "../vrm"}}
+ :aliases {:test {:extra-paths ["test"]
+                  :extra-deps {io.github.cognitect-labs/test-runner
+                               {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+                  :main-opts ["-m" "cognitect.test-runner"]}}}
