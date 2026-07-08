@@ -27,18 +27,20 @@
 
 (defn- read-u16-le [bs off] (bit-or (nth bs off) (bit-shift-left (nth bs (inc off)) 8)))
 
-(defn- read-f32-le [bs off]
-  (let [bb (java.nio.ByteBuffer/wrap (byte-array (map unchecked-byte (subvec bs off (+ off 4)))))]
-    (.order bb java.nio.ByteOrder/LITTLE_ENDIAN)
-    (.getFloat bb 0)))
+#?(:clj
+   (defn- read-f32-le [bs off]
+     (let [bb (java.nio.ByteBuffer/wrap (byte-array (map unchecked-byte (subvec bs off (+ off 4)))))]
+       (.order bb java.nio.ByteOrder/LITTLE_ENDIAN)
+       (.getFloat bb 0))))
 
 (defn- read-joints-vec4-u16 [gltf bin acc-idx n]
   (let [bs (accessor->bytes gltf bin acc-idx)]
     (mapv (fn [i] (mapv #(read-u16-le bs (+ (* i 8) (* % 2))) (range 4))) (range n))))
 
-(defn- read-weights-vec4-f32 [gltf bin acc-idx n]
-  (let [bs (accessor->bytes gltf bin acc-idx)]
-    (mapv (fn [i] (mapv #(read-f32-le bs (+ (* i 16) (* % 4))) (range 4))) (range n))))
+#?(:clj
+   (defn- read-weights-vec4-f32 [gltf bin acc-idx n]
+     (let [bs (accessor->bytes gltf bin acc-idx)]
+       (mapv (fn [i] (mapv #(read-f32-le bs (+ (* i 16) (* % 4))) (range 4))) (range n)))))
 
 (deftest compose-costumed-character-shape-test
   (testing "top-level shape"
@@ -191,17 +193,18 @@
                  "rigid mesh primitive must carry JOINTS_0 (was completely unskinned before the fix)")
              (is (contains? (:attributes prim) :WEIGHTS_0))
              (is (some? expected) (str "no expected joint mapping for material " mat))
-             (when expected
-               (let [joints (read-joints-vec4-u16 gltf bin (:JOINTS_0 (:attributes prim)) n)
-                     weights (read-weights-vec4-f32 gltf bin (:WEIGHTS_0 (:attributes prim)) n)]
-                 (is (pos? n))
-                 ;; every vertex binds fully (weight ~1.0) to exactly the
-                 ;; expected single joint -- never left at [0 0 0 0]/unbound.
-                 (is (every? #(= expected (first %)) joints)
-                     (str "expected every vertex bound to joint " expected
-                          ", got distinct joint0 values " (vec (distinct (map first joints)))))
-                 (is (every? #(> (first %) 0.99) weights)
-                     "expected every vertex fully weighted ([1,0,0,0]) to its single joint"))))))
+             #?(:clj
+                (when expected
+                  (let [joints (read-joints-vec4-u16 gltf bin (:JOINTS_0 (:attributes prim)) n)
+                        weights (read-weights-vec4-f32 gltf bin (:WEIGHTS_0 (:attributes prim)) n)]
+                    (is (pos? n))
+                    ;; every vertex binds fully (weight ~1.0) to exactly the
+                    ;; expected single joint -- never left at [0 0 0 0]/unbound.
+                    (is (every? #(= expected (first %)) joints)
+                        (str "expected every vertex bound to joint " expected
+                             ", got distinct joint0 values " (vec (distinct (map first joints)))))
+                    (is (every? #(> (first %) 0.99) weights)
+                        "expected every vertex fully weighted ([1,0,0,0]) to its single joint")))))))
        ;; both mesh nodes reference the one shared skin -- posing that skin
        ;; now moves the whole figure together, not just the torso.
        (let [nodes (:nodes gltf)
