@@ -4,7 +4,7 @@
   round-trip via `vrm.parse`/`vrm.humanoid` — the same functions
   `kotoba-lang/vrm`'s own test suite uses to validate a compose+export
   round-trip), not just \"doesn't throw\"."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kami.gen.procedural :as proc]
             [vrm.parse :as vrm-parse]
             [vrm.humanoid :as vrm-humanoid]

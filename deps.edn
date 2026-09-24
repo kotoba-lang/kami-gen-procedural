@@ -4,7 +4,11 @@
 ;; override (CLAUDE.md "Actors" section) and this org's other kotoba-lang
 ;; sibling checkouts under orgs/kotoba-lang/*.
 {:paths ["src" "test"]
- :deps {io.github.kotoba-lang/character  {:git/url "https://github.com/kotoba-lang/character.git"
+ :deps {
+        ;; kotoba.test (clojure.test-compatible surface), not clojure.test --
+        ;; scripts/migrate-clojure-test-to-kotoba-test.cljk. Explicit floor.
+        io.github.kotoba-lang/test {:git/url "https://github.com/kotoba-lang/test.git"
+                                    :git/sha "2ab4885f99fd25552d380d0f6b0b54c5a72eb7ae"}io.github.kotoba-lang/character  {:git/url "https://github.com/kotoba-lang/character.git"
                                      :git/sha "197410ae8fab61c2bc46c690fc6affbec046928f"}
         io.github.kotoba-lang/mesher     {:git/url "https://github.com/kotoba-lang/mesher.git"
                                      :git/sha "4eba597c2b50e1b77d256e62bc0289f1e5fb3f51"}
