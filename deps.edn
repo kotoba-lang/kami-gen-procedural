@@ -1,7 +1,7 @@
 ;; kami-gen-procedural — deterministic EDN-parameter composed character
 ;; pipeline (ADR-2607051100, com-junkawasaki/root). :local/root sibling
 ;; deps, same convention as the 3 existing "actor" repos' langgraph-clj
-;; override (CLAUDE.md "Actors" section) and this org's other kotoba-lang
+;; override (AGENTS.md "Actors" section) and this org's other kotoba-lang
 ;; sibling checkouts under orgs/kotoba-lang/*.
 {:paths ["src" "test"]
  :deps {
